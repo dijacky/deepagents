@@ -32,6 +32,7 @@ from deepagents_cli.app import (
     DeferredAction,
     QueuedMessage,
     TextualSessionState,
+    _server_startup_is_local_subprocess,
     _write_iterm_escape,
 )
 from deepagents_cli.widgets.chat_input import ChatInput
@@ -139,6 +140,7 @@ class TestThreadCachePrewarm:
                     current_thread=app._session_state.thread_id,
                     thread_limit=9,
                     initial_threads=cached_threads,
+                    session_store=app._session_store,
                 )
                 mock_push_screen.assert_called_once()
 
@@ -3012,3 +3014,28 @@ class TestDeferredActions:
 
             await app._drain_deferred_actions()
             assert executed == ["thread", "second_model"]
+
+
+class TestServerStartupIsLocalSubprocess:
+    """Tests for welcome-banner local vs remote server labeling."""
+
+    def test_none_kwargs_is_not_local(self) -> None:
+        """No deferred startup implies not local subprocess."""
+        assert _server_startup_is_local_subprocess(None) is False
+
+    def test_kwargs_without_remote_url_is_local(self) -> None:
+        """Default textual path spawns a local langgraph subprocess."""
+        assert _server_startup_is_local_subprocess({"assistant_id": "agent"}) is True
+
+    def test_kwargs_with_remote_url_is_not_local(self) -> None:
+        """``--remote-url`` merges into server_kwargs; banner should not say local."""
+        assert (
+            _server_startup_is_local_subprocess(
+                {"assistant_id": "agent", "remote_url": "http://127.0.0.1:2026"}
+            )
+            is False
+        )
+
+    def test_whitespace_only_remote_url_treated_as_local(self) -> None:
+        """Blank remote URL falls back to local subprocess behavior."""
+        assert _server_startup_is_local_subprocess({"remote_url": "  \t"}) is True

@@ -106,6 +106,29 @@ class TestWaitForServerHealthy:
             await wait_for_server_healthy("http://localhost:2024", timeout=5)
 
         mock_client.get.assert_awaited_once()
+        called_url = mock_client.get.await_args[0][0]
+        assert str(called_url).rstrip("/").endswith("/ok")
+
+    async def test_fallback_to_later_health_paths(self) -> None:
+        """Try ``/ok`` and ``/live`` before succeeding on ``/health``."""
+        responses = [
+            MagicMock(status_code=404),
+            MagicMock(status_code=503),
+            MagicMock(status_code=200),
+        ]
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=responses)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            await wait_for_server_healthy("http://example.test:2026", timeout=5)
+
+        assert mock_client.get.await_count == 3
+        urls = [str(c.args[0]) for c in mock_client.get.await_args_list]
+        assert urls[0].endswith("/ok")
+        assert urls[1].endswith("/live")
+        assert urls[2].endswith("/health")
 
     async def test_raises_on_early_process_exit(self) -> None:
         """Process dies before health check succeeds -> fail fast."""

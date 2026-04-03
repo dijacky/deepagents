@@ -754,6 +754,10 @@ async def run_non_interactive(
     mcp_config_path: str | None = None,
     no_mcp: bool = False,
     trust_project_mcp: bool = False,
+    remote_url: str | None = None,
+    remote_api_key: str | None = None,
+    remote_graph_name: str | None = None,
+    remote_headers: dict[str, str] | None = None,
 ) -> int:
     """Run a single task non-interactively and exit.
 
@@ -801,6 +805,11 @@ async def run_non_interactive(
         trust_project_mcp: When `True`, allow project-level stdio MCP
             servers. When `False` (default), project stdio servers are
             silently skipped.
+        remote_url: When set, skip the local server subprocess and use this
+            LangGraph-compatible base URL.
+        remote_api_key: Optional API key for the remote server.
+        remote_graph_name: Graph id for the remote client (default: ``agent``).
+        remote_headers: Extra HTTP headers for the remote client.
 
     Returns:
         Exit code: 0 for success, 1 for error, 130 for keyboard interrupt.
@@ -873,7 +882,10 @@ async def run_non_interactive(
         )
 
         if not quiet:
-            console.print(Text("Starting LangGraph server...", style="dim"))
+            if remote_url:
+                console.print(Text("Connecting to remote server...", style="dim"))
+            else:
+                console.print(Text("Starting LangGraph server...", style="dim"))
 
         async with server_session(
             assistant_id=assistant_id,
@@ -891,6 +903,10 @@ async def run_non_interactive(
             no_mcp=no_mcp,
             trust_project_mcp=trust_project_mcp,
             interactive=False,
+            remote_url=remote_url,
+            remote_api_key=remote_api_key,
+            remote_graph_name=remote_graph_name,
+            remote_headers=remote_headers,
         ) as (agent, _server_proc):
             # Collect MCP preload result (ran concurrently with server startup)
             if mcp_task is not None:

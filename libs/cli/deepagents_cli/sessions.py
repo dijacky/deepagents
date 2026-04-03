@@ -8,7 +8,7 @@ import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple, NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, NotRequired, TypedDict, cast
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
+    from deepagents_cli._session_store import SessionStore
     from deepagents_cli.output import OutputFormat
 
 logger = logging.getLogger(__name__)
@@ -1016,6 +1017,42 @@ async def delete_thread(thread_id: str) -> bool:
         return deleted
 
 
+async def read_sqlite_checkpoint_channel_values(thread_id: str) -> dict[str, Any]:
+    """Read `channel_values` from the latest row in the local SQLite checkpointer.
+
+    Args:
+        thread_id: LangGraph thread id (`configurable.thread_id`).
+
+    Returns:
+        A shallow copy of checkpoint channel values, or an empty dict on failure.
+    """
+    from langchain_core.runnables import RunnableConfig
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+    try:
+        db_path = str(get_db_path())
+        config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
+        async with AsyncSqliteSaver.from_conn_string(db_path) as saver:
+            tup = await saver.aget_tuple(config)
+            if tup and tup.checkpoint:
+                raw = tup.checkpoint.get("channel_values", {})
+                if isinstance(raw, dict):
+                    return dict(raw)
+    except (ImportError, OSError) as exc:
+        logger.debug(
+            "Failed to read SQLite checkpointer for %s: %s",
+            thread_id,
+            exc,
+        )
+    except Exception:
+        logger.warning(
+            "Unexpected error reading SQLite checkpointer for %s",
+            thread_id,
+            exc_info=True,
+        )
+    return {}
+
+
 @asynccontextmanager
 async def get_checkpointer() -> AsyncIterator[AsyncSqliteSaver]:
     """Get AsyncSqliteSaver for the global database.
@@ -1068,6 +1105,7 @@ async def list_threads_command(
     relative: bool | None = None,
     *,
     output_format: OutputFormat = "text",
+    session_store: SessionStore | None = None,
 ) -> None:
     """CLI handler for `deepagents threads list`.
 
@@ -1091,11 +1129,15 @@ async def list_threads_command(
 
             When `None`, reads from config (`~/.deepagents/config.toml`).
         output_format: Output format — `'text'` (Rich) or `'json'`.
+        session_store: Optional backing store (defaults to local SQLite).
     """
+    from deepagents_cli._session_store import get_default_session_store
     from deepagents_cli.model_config import (
         load_thread_relative_time,
         load_thread_sort_order,
     )
+
+    store = session_store or get_default_session_store()
 
     if sort_by is None:
         raw = load_thread_sort_order()
@@ -1107,7 +1149,7 @@ async def list_threads_command(
 
     limit = get_thread_limit() if limit is None else max(1, limit)
 
-    threads = await list_threads(
+    threads = await store.list_threads(
         agent_name,
         limit=limit,
         include_message_count=True,
@@ -1116,7 +1158,7 @@ async def list_threads_command(
     )
 
     if verbose and threads:
-        await populate_thread_checkpoint_details(
+        await store.populate_thread_checkpoint_details(
             threads, include_message_count=False, include_initial_prompt=True
         )
 
@@ -1208,6 +1250,7 @@ async def delete_thread_command(
     *,
     dry_run: bool = False,
     output_format: OutputFormat = "text",
+    session_store: SessionStore | None = None,
 ) -> None:
     """CLI handler for: deepagents threads delete.
 
@@ -1215,9 +1258,14 @@ async def delete_thread_command(
         thread_id: ID of the thread to delete.
         dry_run: If `True`, print what would happen without making changes.
         output_format: Output format — `'text'` (Rich) or `'json'`.
+        session_store: Optional backing store (defaults to local SQLite).
     """
+    from deepagents_cli._session_store import get_default_session_store
+
+    store = session_store or get_default_session_store()
+
     if dry_run:
-        exists = await thread_exists(thread_id)
+        exists = await store.thread_exists(thread_id)
         if output_format == "json":
             from deepagents_cli.output import write_json
 
@@ -1239,7 +1287,7 @@ async def delete_thread_command(
         console.print("No changes made.", style="dim")
         return
 
-    deleted = await delete_thread(thread_id)
+    deleted = await store.delete_thread(thread_id)
 
     if output_format == "json":
         from deepagents_cli.output import write_json

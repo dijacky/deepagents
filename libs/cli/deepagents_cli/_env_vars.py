@@ -46,6 +46,15 @@ LANGSMITH_PROJECT = "DEEPAGENTS_CLI_LANGSMITH_PROJECT"
 NO_UPDATE_CHECK = "DEEPAGENTS_CLI_NO_UPDATE_CHECK"
 """Disable automatic update checking when set."""
 
+REMOTE_API_KEY = "DEEPAGENTS_CLI_REMOTE_API_KEY"
+"""API key for remote LangGraph-compatible servers (e.g. self-hosted Aegra)."""
+
+REMOTE_GRAPH_NAME = "DEEPAGENTS_CLI_REMOTE_GRAPH_NAME"
+"""Graph or assistant id passed to RemoteGraph when using ``--remote-url``."""
+
+REMOTE_URL = "DEEPAGENTS_CLI_REMOTE_URL"
+"""Base URL of a remote LangGraph-compatible server (skips local ``langgraph dev``)."""
+
 SERVER_ENV_PREFIX = "DEEPAGENTS_CLI_SERVER_"
 """Environment variable prefix used to pass CLI config to the server subprocess."""
 

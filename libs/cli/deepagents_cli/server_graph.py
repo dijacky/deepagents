@@ -12,16 +12,50 @@ ensures the two sides stay in sync.
 
 from __future__ import annotations
 
+import asyncio
 import atexit
+import concurrent.futures
 import logging
 import sys
 import traceback
-from typing import Any
+from typing import TYPE_CHECKING, Any, TypeVar
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 from deepagents_cli._server_config import ServerConfig
 from deepagents_cli.project_utils import ProjectContext, get_server_project_context
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+
+
+def _run_coroutine_blocking(factory: Callable[[], Awaitable[_T]]) -> _T:
+    """Run async code from synchronous call sites (e.g. module import).
+
+    Uses `asyncio.run` when no loop is running. When a loop is already running
+    (e.g. Aegra/Uvicorn loading the graph during lifespan), runs the coroutine
+    in a worker thread with its own loop so we never nest `asyncio.run` on the
+    same thread.
+
+    The factory must create a fresh coroutine; it is invoked on the thread
+    that will own the loop when a nested loop is detected.
+
+    Returns:
+        The coroutine's result after it has finished.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(factory())
+
+    def _runner() -> _T:
+        return asyncio.run(factory())
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(_runner).result()
+
 
 # Module-level sandbox state kept alive for the server process lifetime.
 _sandbox_cm: Any = None
@@ -37,9 +71,10 @@ def _build_tools(
     Loads built-in tools (conditionally including web search when Tavily is
     available) and MCP tools when enabled.
 
-    MCP discovery runs synchronously via `asyncio.run` because this function is
-    called during module-level graph construction (before the server's async
-    event loop is available).
+    MCP discovery runs synchronously via `_run_coroutine_blocking` because this
+    function is called during module-level graph construction. That may happen
+    either before any loop exists or while a host loop is already running
+    (embedded graph load).
 
     Args:
         config: Deserialized server configuration.
@@ -61,13 +96,11 @@ def _build_tools(
 
     mcp_server_info: list[Any] | None = None
     if not config.no_mcp:
-        import asyncio
-
         from deepagents_cli.mcp_tools import resolve_and_load_mcp_tools
 
         try:
-            mcp_tools, _, mcp_server_info = asyncio.run(
-                resolve_and_load_mcp_tools(
+            mcp_tools, _, mcp_server_info = _run_coroutine_blocking(
+                lambda: resolve_and_load_mcp_tools(
                     explicit_config_path=config.mcp_config_path,
                     no_mcp=config.no_mcp,
                     trust_project_mcp=config.trust_project_mcp,

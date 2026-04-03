@@ -207,7 +207,11 @@ async def start_server_and_get_agent(
     interactive: bool = True,
     host: str = "127.0.0.1",
     port: int = 2024,
-) -> tuple[RemoteAgent, ServerProcess, MCPSessionManager | None]:
+    remote_url: str | None = None,
+    remote_api_key: str | None = None,
+    remote_graph_name: str | None = None,
+    remote_headers: dict[str, str] | None = None,
+) -> tuple[RemoteAgent, ServerProcess | None, MCPSessionManager | None]:
     """Start a LangGraph server and return a connected remote agent client.
 
     Args:
@@ -228,6 +232,11 @@ async def start_server_and_get_agent(
         interactive: Whether the agent is interactive.
         host: Server host.
         port: Server port.
+        remote_url: When set, skip the local ``langgraph dev`` subprocess and
+            connect to this LangGraph-compatible base URL (e.g. Aegra).
+        remote_api_key: Optional API key for the remote server.
+        remote_graph_name: Graph / assistant id for ``RemoteGraph`` (default: ``agent``).
+        remote_headers: Extra HTTP headers for the remote client.
 
     Returns:
         Tuple of `(remote_agent, server_process, mcp_session_manager)`.
@@ -235,7 +244,39 @@ async def start_server_and_get_agent(
             is handled server-side).
     """
     from deepagents_cli.remote_client import RemoteAgent
-    from deepagents_cli.server import ServerProcess
+    from deepagents_cli.server import ServerProcess, wait_for_server_healthy
+
+    if remote_url:
+        project_context = _capture_project_context()
+        config = ServerConfig.from_cli_args(
+            project_context=project_context,
+            model_name=model_name,
+            model_params=model_params,
+            assistant_id=assistant_id,
+            auto_approve=auto_approve,
+            interrupt_shell_only=interrupt_shell_only,
+            shell_allow_list=shell_allow_list,
+            sandbox_type=sandbox_type,
+            sandbox_id=sandbox_id,
+            sandbox_setup=sandbox_setup,
+            enable_shell=enable_shell,
+            enable_ask_user=enable_ask_user,
+            mcp_config_path=mcp_config_path,
+            no_mcp=no_mcp,
+            trust_project_mcp=trust_project_mcp,
+            interactive=interactive,
+        )
+        _apply_server_config(config)
+        base = remote_url.rstrip("/")
+        await wait_for_server_healthy(base, local=False)
+        graph = remote_graph_name or "agent"
+        agent = RemoteAgent(
+            base,
+            graph_name=graph,
+            api_key=remote_api_key,
+            headers=remote_headers,
+        )
+        return agent, None, None
 
     project_context = _capture_project_context()
 
@@ -304,7 +345,11 @@ async def server_session(
     interactive: bool = True,
     host: str = "127.0.0.1",
     port: int = 2024,
-) -> AsyncIterator[tuple[RemoteAgent, ServerProcess]]:
+    remote_url: str | None = None,
+    remote_api_key: str | None = None,
+    remote_graph_name: str | None = None,
+    remote_headers: dict[str, str] | None = None,
+) -> AsyncIterator[tuple[RemoteAgent, ServerProcess | None]]:
     """Async context manager that starts a server and guarantees cleanup.
 
     Wraps `start_server_and_get_agent` so callers don't need to duplicate the
@@ -353,6 +398,10 @@ async def server_session(
             interactive=interactive,
             host=host,
             port=port,
+            remote_url=remote_url,
+            remote_api_key=remote_api_key,
+            remote_graph_name=remote_graph_name,
+            remote_headers=remote_headers,
         )
         yield agent, server_proc
     finally:

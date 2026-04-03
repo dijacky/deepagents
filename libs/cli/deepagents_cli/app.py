@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     from textual.worker import Worker
 
     from deepagents_cli._ask_user_types import AskUserWidgetResult, Question
+    from deepagents_cli._session_store import SessionStore
     from deepagents_cli.mcp_tools import MCPServerInfo
     from deepagents_cli.remote_client import RemoteAgent
     from deepagents_cli.server import ServerProcess
@@ -421,6 +422,25 @@ _COMMAND_URLS: dict[str, str] = {
 """Slash-command to URL mapping for commands that just open a browser."""
 
 
+def _server_startup_is_local_subprocess(server_kwargs: dict[str, Any] | None) -> bool:
+    """Return whether deferred startup will spawn a local LangGraph subprocess.
+
+    Remote mode still passes a non-empty ``server_kwargs`` dict (with
+    ``remote_url``); the welcome banner uses this to avoid calling that path
+    a 'local server'.
+
+    Args:
+        server_kwargs: Kwargs for ``start_server_and_get_agent``, or ``None``.
+
+    Returns:
+        ``True`` when ``server_kwargs`` is set and ``remote_url`` is missing or
+        blank after stripping.
+    """
+    if server_kwargs is None:
+        return False
+    return not str(server_kwargs.get("remote_url") or "").strip()
+
+
 class DeepAgentsApp(App):
     """Main Textual application for deepagents-cli."""
 
@@ -523,6 +543,7 @@ class DeepAgentsApp(App):
         server_kwargs: dict[str, Any] | None = None,
         mcp_preload_kwargs: dict[str, Any] | None = None,
         model_kwargs: dict[str, Any] | None = None,
+        session_store: SessionStore | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the Deep Agents application.
@@ -565,9 +586,14 @@ class DeepAgentsApp(App):
 
                 When provided, model creation runs in a background worker after
                 first paint instead of blocking startup.
+            session_store: Thread listing / checkpoint access (local SQLite or remote).
             **kwargs: Additional arguments passed to parent
         """
         super().__init__(**kwargs)
+
+        from deepagents_cli._session_store import get_default_session_store
+
+        self._session_store = session_store or get_default_session_store()
 
         self._register_custom_themes()
 
@@ -769,7 +795,7 @@ class DeepAgentsApp(App):
                 mcp_tool_count=self._mcp_tool_count,
                 connecting=self._connecting,
                 resuming=self._resume_thread_intent is not None,
-                local_server=self._server_kwargs is not None,
+                local_server=_server_startup_is_local_subprocess(self._server_kwargs),
                 id="welcome-banner",
             )
             yield Container(id="messages")
@@ -1136,13 +1162,9 @@ class DeepAgentsApp(App):
         `self._assistant_id` / `self._server_kwargs`. Falls back to a fresh
         thread on any DB error.
         """
-        from deepagents_cli.sessions import (
-            find_similar_threads,
-            generate_thread_id,
-            get_most_recent,
-            get_thread_agent,
-            thread_exists,
-        )
+        from deepagents_cli.sessions import generate_thread_id
+
+        store = self._session_store
 
         resume = self._resume_thread_intent
         self._resume_thread_intent = None  # consumed
@@ -1161,9 +1183,9 @@ class DeepAgentsApp(App):
                 agent_filter = (
                     self._assistant_id if self._assistant_id != default_agent else None
                 )
-                thread_id = await get_most_recent(agent_filter)
+                thread_id = await store.get_most_recent(agent_filter)
                 if thread_id:
-                    agent_name = await get_thread_agent(thread_id)
+                    agent_name = await store.get_thread_agent(thread_id)
                     if agent_name:
                         self._assistant_id = agent_name
                         if self._server_kwargs:
@@ -1176,10 +1198,10 @@ class DeepAgentsApp(App):
                     else:
                         msg = "No previous threads, starting new."
                     self.notify(msg, severity="warning", markup=False)
-            elif await thread_exists(resume):
+            elif await store.thread_exists(resume):
                 self._lc_thread_id = resume
                 if self._assistant_id == default_agent:
-                    agent_name = await get_thread_agent(resume)
+                    agent_name = await store.get_thread_agent(resume)
                     if agent_name:
                         self._assistant_id = agent_name
                         if self._server_kwargs:
@@ -1187,7 +1209,7 @@ class DeepAgentsApp(App):
             else:
                 # Thread not found — notify + fall back to new thread
                 self._lc_thread_id = generate_thread_id()
-                similar = await find_similar_threads(resume)
+                similar = await store.find_similar_threads(resume)
                 hint = f"Thread '{resume}' not found."
                 if similar:
                     hint += f" Did you mean: {', '.join(str(t) for t in similar)}?"
@@ -1419,14 +1441,13 @@ class DeepAgentsApp(App):
             ThreadSelectorScreen,
         )
 
-    async def _prewarm_threads_cache(self) -> None:  # noqa: PLR6301  # Worker hook kept as instance method
+    async def _prewarm_threads_cache(self) -> None:  # Worker hook kept as instance method
         """Prewarm thread selector cache without blocking app startup."""
-        from deepagents_cli.sessions import (
-            get_thread_limit,
-            prewarm_thread_message_counts,
-        )
+        from deepagents_cli.sessions import get_thread_limit
 
-        await prewarm_thread_message_counts(limit=get_thread_limit())
+        await self._session_store.prewarm_thread_message_counts(
+            limit=get_thread_limit()
+        )
 
     async def _prewarm_model_caches(self) -> None:
         """Prewarm model discovery and profile caches without blocking startup."""
@@ -3580,43 +3601,28 @@ class DeepAgentsApp(App):
         data = await asyncio.to_thread(self._convert_messages_to_data, messages)
         return _ThreadHistoryPayload(data, context_tokens)
 
-    @staticmethod
-    async def _read_channel_values_from_checkpointer(thread_id: str) -> dict[str, Any]:
-        """Read checkpoint channel values directly from the SQLite checkpointer.
+    async def _read_channel_values_from_checkpointer(
+        self,
+        thread_id: str,
+    ) -> dict[str, Any]:
+        """Read checkpoint channel values via the active session store.
 
         Args:
             thread_id: Thread ID to look up.
 
         Returns:
-            Channel values from the latest checkpoint, or an empty dict on
-                failure.
+            Channel values from the latest checkpoint (local SQLite) or remote
+            state, or an empty dict on failure.
         """
         try:
-            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-
-            from deepagents_cli.sessions import get_db_path
-
-            db_path = str(get_db_path())
-            config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
-            async with AsyncSqliteSaver.from_conn_string(db_path) as saver:
-                tup = await saver.aget_tuple(config)
-                if tup and tup.checkpoint:
-                    channel_values = tup.checkpoint.get("channel_values", {})
-                    if isinstance(channel_values, dict):
-                        return dict(channel_values)
-        except (ImportError, OSError) as exc:
-            logger.warning(
-                "Failed to read checkpointer directly for %s: %s",
-                thread_id,
-                exc,
-            )
+            return await self._session_store.read_checkpoint_channel_values(thread_id)
         except Exception:
             logger.warning(
                 "Unexpected error reading checkpointer for %s",
                 thread_id,
                 exc_info=True,
             )
-        return {}
+            return {}
 
     async def _upgrade_thread_message_link(
         self,
@@ -4537,13 +4543,13 @@ class DeepAgentsApp(App):
         """Show interactive thread selector as a modal screen."""
         from functools import partial
 
-        from deepagents_cli.sessions import get_cached_threads, get_thread_limit
+        from deepagents_cli.sessions import get_thread_limit
         from deepagents_cli.widgets.thread_selector import ThreadSelectorScreen
 
         current = self._session_state.thread_id if self._session_state else None
         thread_limit = get_thread_limit()
 
-        initial_threads = get_cached_threads(limit=thread_limit)
+        initial_threads = self._session_store.get_cached_threads(limit=thread_limit)
 
         def handle_result(result: str | None) -> None:
             """Handle the thread selector result."""
@@ -4567,6 +4573,7 @@ class DeepAgentsApp(App):
             current_thread=current,
             thread_limit=thread_limit,
             initial_threads=initial_threads,
+            session_store=self._session_store,
         )
         self.push_screen(screen, handle_result)
 
@@ -4926,6 +4933,7 @@ async def run_textual_app(
     server_kwargs: dict[str, Any] | None = None,
     mcp_preload_kwargs: dict[str, Any] | None = None,
     model_kwargs: dict[str, Any] | None = None,
+    session_store: SessionStore | None = None,
 ) -> AppResult:
     """Run the Textual application.
 
@@ -4962,6 +4970,7 @@ async def run_textual_app(
 
             When provided, model creation runs in a background worker after
             first paint so the splash screen appears immediately.
+        session_store: Thread listing / checkpoint access for resume and `/threads`.
 
     Returns:
         An `AppResult` with the return code and final thread ID.
@@ -4981,6 +4990,7 @@ async def run_textual_app(
         server_kwargs=server_kwargs,
         mcp_preload_kwargs=mcp_preload_kwargs,
         model_kwargs=model_kwargs,
+        session_store=session_store,
     )
     try:
         await app.run_async()

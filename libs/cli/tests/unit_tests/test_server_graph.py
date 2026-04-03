@@ -130,3 +130,78 @@ class TestServerGraph:
             async_subagents=None,
         )
         assert module.graph is graph_obj
+
+    async def test_mcp_loads_under_running_event_loop(self) -> None:
+        """MCP load works when graph import runs under a host loop (e.g. Uvicorn)."""
+        graph_obj = object()
+        model_obj = object()
+        fetch_tool = object()
+        mcp_tool = object()
+        mcp_server_info = [SimpleNamespace(name="docs")]
+        create_cli_agent = MagicMock(return_value=(graph_obj, object()))
+        agent_module = _module_with_attrs(
+            "deepagents_cli.agent",
+            DEFAULT_AGENT_NAME="agent",
+            create_cli_agent=create_cli_agent,
+            load_async_subagents=MagicMock(return_value=None),
+        )
+
+        model_result = SimpleNamespace(
+            model=model_obj,
+            apply_to_settings=MagicMock(),
+        )
+        config_module = _module_with_attrs(
+            "deepagents_cli.config",
+            create_model=MagicMock(return_value=model_result),
+            settings=SimpleNamespace(
+                has_tavily=False,
+                reload_from_environment=MagicMock(),
+            ),
+        )
+
+        tools_module = _module_with_attrs(
+            "deepagents_cli.tools",
+            fetch_url=fetch_tool,
+            web_search=object(),
+        )
+
+        resolve_mcp_tools = AsyncMock(return_value=([mcp_tool], None, mcp_server_info))
+        mcp_module = _module_with_attrs(
+            "deepagents_cli.mcp_tools",
+            resolve_and_load_mcp_tools=resolve_mcp_tools,
+        )
+
+        config = ServerConfig(no_mcp=False)
+        env_overrides = {}
+        for suffix, value in config.to_env().items():
+            if value is not None:
+                env_overrides[f"{SERVER_ENV_PREFIX}{suffix}"] = value
+
+        with (
+            patch.dict(os.environ, env_overrides, clear=False),
+            patch.dict(
+                sys.modules,
+                {
+                    "deepagents_cli.agent": agent_module,
+                    "deepagents_cli.config": config_module,
+                    "deepagents_cli.tools": tools_module,
+                    "deepagents_cli.mcp_tools": mcp_module,
+                },
+            ),
+            patch(
+                "deepagents_cli.project_utils.get_server_project_context",
+                return_value=None,
+            ),
+        ):
+            for suffix in (
+                "MCP_CONFIG_PATH",
+                "TRUST_PROJECT_MCP",
+                "CWD",
+                "PROJECT_ROOT",
+            ):
+                os.environ.pop(f"{SERVER_ENV_PREFIX}{suffix}", None)
+
+            module = _import_fresh_server_graph()
+
+        resolve_mcp_tools.assert_awaited_once()
+        assert module.graph is graph_obj

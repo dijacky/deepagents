@@ -11,6 +11,7 @@ import contextlib
 import json
 import logging
 import os
+import shutil
 import signal
 import subprocess  # noqa: S404
 import sys
@@ -173,7 +174,8 @@ async def wait_for_server_healthy(
     """Poll a LangGraph server health endpoint until it responds.
 
     Args:
-        url: Server base URL (health endpoint is `{url}/ok`).
+        url: Server base URL. Probes ``/ok``, then ``/live``, then ``/health``
+            until one returns HTTP 200.
         timeout: Max seconds to wait.
         process: Optional subprocess handle; if the process exits early
             we fail fast instead of waiting for the timeout.
@@ -189,7 +191,8 @@ async def wait_for_server_healthy(
     poll_interval = (
         _HEALTH_POLL_INTERVAL_LOCAL if local else _HEALTH_POLL_INTERVAL_REMOTE
     )
-    health_url = f"{url}/ok"
+    base = url.rstrip("/")
+    health_paths = ("/ok", "/live", "/health")
     deadline = time.monotonic() + timeout
     last_status: int | None = None
     last_exc: Exception | None = None
@@ -204,12 +207,16 @@ async def wait_for_server_healthy(
                 raise RuntimeError(msg)
 
             try:
-                resp = await client.get(health_url, timeout=2)
-                if resp.status_code == 200:  # noqa: PLR2004
-                    logger.info("Server is healthy at %s", url)
-                    return
-                last_status = resp.status_code
-                logger.debug("Health check returned status %d", resp.status_code)
+                for path in health_paths:
+                    health_url = f"{base}{path}"
+                    resp = await client.get(health_url, timeout=2)
+                    if resp.status_code == 200:  # noqa: PLR2004
+                        logger.info("Server is healthy at %s (%s)", url, path)
+                        return
+                    last_status = resp.status_code
+                    logger.debug(
+                        "Health check %s returned status %d", path, resp.status_code
+                    )
             except (httpx.TransportError, OSError) as exc:
                 logger.debug("Health check attempt failed: %s", exc)
                 last_exc = exc
@@ -229,8 +236,22 @@ async def wait_for_server_healthy(
 # ---------------------------------------------------------------------------
 
 
+def _get_cli_project_root() -> Path:
+    """Return the CLI project root (directory containing pyproject.toml).
+
+    Used when spawning the langgraph dev subprocess so `uv run` can find the
+    project and use the correct venv (avoids sys.executable pointing to a
+    different Python under debuggers).
+    """
+    return Path(__file__).resolve().parent.parent
+
+
 def _build_server_cmd(config_path: Path, *, host: str, port: int) -> list[str]:
     """Build the `langgraph dev` command line.
+
+    Uses `uv run` when available so the subprocess uses the project's venv,
+    which works correctly under debuggers where sys.executable may differ.
+    Falls back to sys.executable when uv is not in PATH.
 
     Args:
         config_path: Path to the `langgraph.json` config file.
@@ -240,10 +261,7 @@ def _build_server_cmd(config_path: Path, *, host: str, port: int) -> list[str]:
     Returns:
         Command argv list.
     """
-    return [
-        sys.executable,
-        "-m",
-        "langgraph_cli",
+    base = [
         "dev",
         "--host",
         host,
@@ -254,6 +272,18 @@ def _build_server_cmd(config_path: Path, *, host: str, port: int) -> list[str]:
         "--config",
         str(config_path),
     ]
+    if shutil.which("uv") is not None:
+        return [
+            "uv",
+            "run",
+            "--project",
+            str(_get_cli_project_root()),
+            "python",
+            "-m",
+            "langgraph_cli",
+            *base,
+        ]
+    return [sys.executable, "-m", "langgraph_cli", *base]
 
 
 def _build_server_env() -> dict[str, str]:

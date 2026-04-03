@@ -1,0 +1,31 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python Debugger: deepagents_cli",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "deepagents_cli",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": false
+    },
+    {
+      "name": "Python Debugger: deepagents_cli (remote Aegra)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "deepagents_cli",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": false,
+      "env": {
+        "DEEPAGENTS_CLI_REMOTE_GRAPH_NAME": "deepagents"
+      },
+      "args": ["--remote-url", "http://127.0.0.1:2026"]
+    }
+  ]
+}

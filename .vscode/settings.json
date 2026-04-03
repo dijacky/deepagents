@@ -3,6 +3,9 @@
   "python.analysis.include": [
     "libs/**"
   ],
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/libs/deepagents"
+  ],
   "python.analysis.exclude": [
     "**/node_modules",
     "**/__pycache__",

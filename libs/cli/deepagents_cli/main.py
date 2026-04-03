@@ -23,8 +23,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from deepagents_cli._session_store import SessionStore
     from deepagents_cli.app import AppResult
     from deepagents_cli.mcp_tools import MCPServerInfo
+    from deepagents_cli.remote_server_settings import RemoteServerSettings
 
 # Suppress Pydantic v1 compatibility warnings from langchain on Python 3.14+
 warnings.filterwarnings("ignore", message=".*Pydantic V1.*", category=UserWarning)
@@ -573,6 +575,16 @@ def parse_args() -> argparse.Namespace:
         help="Path to setup script to run in sandbox after creation",
     )
     parser.add_argument(
+        "--remote-url",
+        metavar="URL",
+        default=None,
+        help=(
+            "Use a remote LangGraph-compatible server (e.g. Aegra) instead of "
+            "starting local langgraph dev. Overrides DEEPAGENTS_CLI_REMOTE_URL "
+            "and [server].remote_url in ~/.deepagents/config.toml when set."
+        ),
+    )
+    parser.add_argument(
         "-S",
         "--shell-allow-list",
         metavar="LIST",
@@ -652,6 +664,8 @@ async def run_textual_cli_async(
     mcp_config_path: str | None = None,
     no_mcp: bool = False,
     trust_project_mcp: bool | None = None,
+    remote_settings: "RemoteServerSettings | None" = None,
+    session_store: "SessionStore | None" = None,
 ) -> "AppResult":
     """Run the Textual CLI interface (async version).
 
@@ -691,12 +705,16 @@ async def run_textual_cli_async(
         trust_project_mcp: Controls project-level stdio server trust.
 
             `True` to allow, `False` to deny, `None` to check trust store.
+        remote_settings: When set, `start_server_and_get_agent` connects to this
+            URL instead of spawning a local server.
+        session_store: Thread listing and checkpoint access for the TUI.
 
     Returns:
         An `AppResult` with the return code and final thread ID.
     """
     from rich.text import Text
 
+    from deepagents_cli._session_store import build_session_store
     from deepagents_cli.app import AppResult, run_textual_app
     from deepagents_cli.config import (
         _get_default_model_spec,
@@ -704,6 +722,8 @@ async def run_textual_cli_async(
         settings,
     )
     from deepagents_cli.model_config import ModelConfigError, ModelSpec
+
+    store = session_store or build_session_store(remote_settings)
 
     # Resolve display-name cheaply (<1ms, no langchain) so the status
     # bar can show the model on first paint. The expensive create_model()
@@ -751,6 +771,15 @@ async def run_textual_cli_async(
         "trust_project_mcp": trust_project_mcp,
         "interactive": True,
     }
+    if remote_settings is not None:
+        server_kwargs.update(
+            {
+                "remote_url": remote_settings.url,
+                "remote_api_key": remote_settings.api_key,
+                "remote_graph_name": remote_settings.graph_name,
+                "remote_headers": remote_settings.headers,
+            }
+        )
 
     mcp_preload_kwargs: dict[str, Any] | None = None
     if not no_mcp:
@@ -773,6 +802,7 @@ async def run_textual_cli_async(
             server_kwargs=server_kwargs,
             mcp_preload_kwargs=mcp_preload_kwargs,
             model_kwargs=model_kwargs,
+            session_store=store,
         )
     except Exception as e:
         logger.debug("App error", exc_info=True)
@@ -1184,7 +1214,14 @@ def cli_main() -> None:
 
         # Import console/settings AFTER arg parsing so --help (which exits
         # inside parse_args) never pays the settings bootstrap cost.
+        from deepagents_cli._session_store import build_session_store
         from deepagents_cli.config import console, settings
+        from deepagents_cli.remote_server_settings import resolve_remote_server_settings
+
+        remote_settings = resolve_remote_server_settings(
+            cli_remote_url=getattr(args, "remote_url", None),
+        )
+        session_store = build_session_store(remote_settings)
 
         model_params: dict[str, Any] | None = None
         raw_kwargs = getattr(args, "model_params", None)
@@ -1440,6 +1477,7 @@ def cli_main() -> None:
                         verbose=getattr(args, "verbose", False),
                         relative=getattr(args, "relative", None),
                         output_format=output_format,
+                        session_store=session_store,
                     )
                 )
             elif args.threads_command == "delete":
@@ -1448,6 +1486,7 @@ def cli_main() -> None:
                         args.thread_id,
                         dry_run=args.dry_run,
                         output_format=output_format,
+                        session_store=session_store,
                     )
                 )
             else:
@@ -1489,6 +1528,14 @@ def cli_main() -> None:
             # Non-interactive mode - execute single task and exit
             from deepagents_cli.non_interactive import run_non_interactive
 
+            ni_remote: dict[str, Any] = {}
+            if remote_settings is not None:
+                ni_remote = {
+                    "remote_url": remote_settings.url,
+                    "remote_api_key": remote_settings.api_key,
+                    "remote_graph_name": remote_settings.graph_name,
+                    "remote_headers": remote_settings.headers,
+                }
             exit_code = asyncio.run(
                 run_non_interactive(
                     message=args.non_interactive_message,
@@ -1504,6 +1551,7 @@ def cli_main() -> None:
                     mcp_config_path=getattr(args, "mcp_config", None),
                     no_mcp=getattr(args, "no_mcp", False),
                     trust_project_mcp=getattr(args, "trust_project_mcp", False),
+                    **ni_remote,
                 )
             )
             sys.exit(exit_code)
@@ -1515,10 +1563,7 @@ def cli_main() -> None:
             from deepagents_cli.config import (
                 build_langsmith_thread_url,
             )
-            from deepagents_cli.sessions import (
-                generate_thread_id,
-                thread_exists,
-            )
+            from deepagents_cli.sessions import generate_thread_id
 
             # Instead of resolving thread_id here with synchronous asyncio.run()
             # DB calls, pass the raw resume request to the TUI and let it
@@ -1564,6 +1609,8 @@ def cli_main() -> None:
                         mcp_config_path=getattr(args, "mcp_config", None),
                         no_mcp=getattr(args, "no_mcp", False),
                         trust_project_mcp=mcp_trust_decision,
+                        remote_settings=remote_settings,
+                        session_store=session_store,
                     )
                 )
                 return_code = result.return_code
@@ -1583,7 +1630,8 @@ def cli_main() -> None:
             if thread_id:
                 try:
                     thread_url = build_langsmith_thread_url(thread_id)
-                    if thread_url and asyncio.run(thread_exists(thread_id)):
+                    exists = asyncio.run(session_store.thread_exists(thread_id))
+                    if thread_url and exists:
                         console.print()
                         ls_hint = Text("View this thread in LangSmith: ", style="dim")
                         ls_hint.append(
@@ -1598,7 +1646,9 @@ def cli_main() -> None:
                     )
 
             # Show resume hint on exit for threads with checkpointed content.
-            if thread_id and return_code == 0 and asyncio.run(thread_exists(thread_id)):
+            if thread_id and return_code == 0 and asyncio.run(
+                session_store.thread_exists(thread_id)
+            ):
                 console.print()
                 console.print("[dim]Resume this thread with:[/dim]")
                 hint = Text("deepagents -r ", style="cyan")

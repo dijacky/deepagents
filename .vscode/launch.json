@@ -1,0 +1,27 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: deepagents_cli",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/libs/cli/run_debug.py",
+            "python": "${workspaceFolder}/libs/cli/.venv/bin/python",
+            "cwd": "${workspaceFolder}/libs/cli",
+            "console": "integratedTerminal",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/libs/deepagents"
+            },
+            "envFile": "${workspaceFolder}/libs/cli/.env",
+            "justMyCode": false
+        },
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "envFile": "${workspaceFolder}/.env"
+        }
+    ]
+}

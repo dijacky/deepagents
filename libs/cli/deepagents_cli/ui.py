@@ -91,6 +91,9 @@ def show_help() -> None:
         "  --sandbox-setup PATH       Setup script to run in sandbox after creation"
     )
     console.print(
+        "  --remote-url URL           Use a remote LangGraph server instead of local dev"
+    )
+    console.print(
         "  --mcp-config PATH          Load MCP tools from config file"
         " (merged on top of auto-discovered configs)"
     )

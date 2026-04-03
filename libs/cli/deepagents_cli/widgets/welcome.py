@@ -40,6 +40,7 @@ _TIPS: list[str] = [
     "Use /theme to customize the CLI colors and style",
     "Use /skill-creator to build reusable agent skills",
     "Use /auto-update to toggle automatic CLI updates",
+    "Use --remote-url to connect to a hosted LangGraph server (skip local dev)",
 ]
 """Rotating tips shown in the welcome footer.
 
